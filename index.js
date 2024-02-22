@@ -1,13 +1,16 @@
-// index.js
 const express = require("express");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const { GridFsStorage } = require("multer-gridfs-storage");
+const cors = require("cors"); // Import the cors middleware
 
-require('dotenv').config();
+require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Use cors middleware
+app.use(cors());
 
 // Connect to MongoDB
 const mongoURI = process.env.MONGODB_URI;
@@ -34,53 +37,74 @@ const storage = new GridFsStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({ storage,
+  limits:{
+  fileSize: 1024 * 1024 * 500
+} });
 
 // Upload route
-app.post("/upload", upload.single("file"), (req, res) => {
-  res.json({ message: "File uploaded successfully" });
-}, (err) => {
-  console.log(err);
-  res.status(400).send(err);
+app.post("/upload", upload.single("file"), (req, res, next) => {
+  if (!req.file) {
+    return res.status(400).send("<h1>No file uploaded</h1>");
+  }
+  res.send(`
+    <h1>File uploaded successfully</h1>
+    <p>Filename: ${req.file.originalname}</p>
+  `);
 });
 
+// Serve the HTML page
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + "/index.html");
+});
+
+// Stream video route
 app.get("/show/:filename", (req, res) => {
   const filename = req.params.filename;
 
-  gfs.find({ filename }).toArray((err, files) => {
-    if (!files || files.length === 0) {
-      return res.status(404).json({ message: "File not found" });
-    }
-
-    const readstream = gfs.openDownloadStreamByName(filename);
-    readstream.on('error', (err) => {
-      console.error(err);
-      res.status(500).send('Server Error');
+  new Promise((resolve, reject) => {
+    gfs.find({ filename }).toArray((err, files) => {
+      if (err) {
+        reject(err);
+      } else if (!files || files.length === 0) {
+        reject(new Error("File not found"));
+      } else {
+        resolve(files[0]);
+      }
     });
+  })
+    .then((file) => {
+      const readstream = gfs.openDownloadStreamByName(filename);
 
-    const range = req.headers.range;
-    if (range) {
-      console.log("test1");
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : files[0].length - 1;
-      const chunksize = (end - start) + 1;
-
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${files[0].length}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': files[0].contentType
+      readstream.on("error", (err) => {
+        console.error(err);
+        res.status(500).send("Server Error");
       });
 
-      readstream.pipe(res);
-    } else {
-      res.status(416).send('Range Not Satisfiable');
-    }
-  });
+      const range = req.headers.range;
+      if (range) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : file.length - 1;
+        const chunksize = end - start + 1;
+
+        res.writeHead(206, {
+          "Content-Range": `bytes ${start}-${end}/${file.length}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": chunksize,
+          "Content-Type": file.contentType,
+        });
+
+        readstream.pipe(res);
+      } else {
+        res.status(416).send("Range Not Satisfiable");
+      }
+    })
+    .catch((error) => {
+      console.error(error);
+      res.status(500).send("Server Error");
+    });
 });
-
-
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
